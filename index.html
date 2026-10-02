@@ -646,7 +646,7 @@
             나만의 만화 만들기
           </p>
           <h1 id="page-title">내 사진을<br><span>만화 한 컷으로!</span></h1>
-          <p class="intro-copy">좋아하는 사진을 올려보세요. 또렷한 윤곽선과 생생한 색감의 만화풍 이미지로 바꿔드려요.</p>
+          <p class="intro-copy">좋아하는 사진에 섬세한 펜 선과 따뜻한 채색을 더해, 손으로 그린 일러스트 만화 한 컷처럼 바꿔보세요.</p>
         </section>
 
         <section class="workspace" aria-label="사진 만화풍 변환 도구">
@@ -691,7 +691,7 @@
             <div class="preview-header">
               <div>
                 <h2 class="section-heading" id="preview-heading"><span class="step">2</span> 변환 결과</h2>
-                <p class="preview-header-copy">원본과 만화풍 이미지를 비교해보세요</p>
+                <p class="preview-header-copy">섬세한 윤곽선과 부드러운 색감의 일러스트 스타일</p>
               </div>
               <a class="download-button" id="download-button" href="#" download="comic-style.png">
                 <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -725,7 +725,7 @@
             </div>
           </section>
         </section>
-        <footer>변환은 이 브라우저 안에서만 이루어져요. 이미지가 서버에 업로드되거나 저장되지 않습니다.</footer>
+        <footer>손그림 같은 가는 윤곽선과 따뜻하고 부드러운 색감을 더해요. 변환은 이 브라우저 안에서 처리됩니다.</footer>
       </main>
     </div>
 
@@ -847,35 +847,107 @@
         return data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
       }
 
-      function applyComicEffect(imageData, width, height) {
+      function nextFrame() {
+        return new Promise((resolve) => {
+          if (typeof requestAnimationFrame === "function") requestAnimationFrame(resolve);
+          else window.setTimeout(resolve, 0);
+        });
+      }
+
+      async function applyComicEffect(imageData, width, height, onProgress) {
         const pixels = imageData.data;
-        const edgeThreshold = 35;
-        const colorStep = 42;
+        const original = new Uint8ClampedArray(pixels);
+        const luma = new Float32Array(width * height);
+        const hatchSpacing = clamp(Math.round(Math.min(width, height) / 95), 8, 13);
+        const inkColor = [43, 37, 35];
+        const paperTint = [6, 3, -4];
+        const colorStep = 22;
+
+        for (let i = 0; i < width * height; i += 1) {
+          const index = i * 4;
+          luma[i] = luminance(original, index);
+        }
+
+        function sampleLuma(x, y) {
+          const safeX = clamp(x, 0, width - 1);
+          const safeY = clamp(y, 0, height - 1);
+          return luma[safeY * width + safeX];
+        }
 
         for (let y = 0; y < height; y += 1) {
           for (let x = 0; x < width; x += 1) {
             const index = (y * width + x) * 4;
-            const current = luminance(pixels, index);
-            const rightIndex = x + 1 < width ? index + 4 : index;
-            const belowIndex = y + 1 < height ? index + width * 4 : index;
-            const edge = (Math.abs(current - luminance(pixels, rightIndex))
-              + Math.abs(current - luminance(pixels, belowIndex))) / 2;
-            const line = clamp((edge - edgeThreshold) / 64, 0, 0.84);
-            const gray = (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
+            const pixelLuma = luma[y * width + x];
+            const gx = -sampleLuma(x - 1, y - 1) + sampleLuma(x + 1, y - 1)
+              - 2 * sampleLuma(x - 1, y) + 2 * sampleLuma(x + 1, y)
+              - sampleLuma(x - 1, y + 1) + sampleLuma(x + 1, y + 1);
+            const gy = -sampleLuma(x - 1, y - 1) - 2 * sampleLuma(x, y - 1)
+              - sampleLuma(x + 1, y - 1) + sampleLuma(x - 1, y + 1)
+              + 2 * sampleLuma(x, y + 1) + sampleLuma(x + 1, y + 1);
+            const edgeStrength = Math.hypot(gx, gy);
+            const ink = clamp((edgeStrength - 135) / 560, 0, 0.78);
+            const gray = (original[index] + original[index + 1] + original[index + 2]) / 3;
+            const darkness = clamp((112 - pixelLuma) / 65, 0, 1);
+            const diagonal = ((x + y) % hatchSpacing + hatchSpacing) % hatchSpacing;
+            const crossDiagonal = ((x - y) % hatchSpacing + hatchSpacing) % hatchSpacing;
+            const hatch = darkness > 0.2
+              ? (Math.min(diagonal, hatchSpacing - diagonal) < 1
+                ? 0.12 * darkness
+                : darkness > 0.75 && Math.min(crossDiagonal, hatchSpacing - crossDiagonal) < 1
+                  ? 0.1 * darkness
+                  : 0)
+              : 0;
 
             for (let channel = 0; channel < 3; channel += 1) {
-              const vivid = gray + (pixels[index + channel] - gray) * 1.16;
-              const contrasted = (vivid - 128) * 1.12 + 128;
-              const posterized = Math.round(clamp(contrasted, 0, 255) / colorStep) * colorStep;
-              pixels[index + channel] = Math.round(posterized * (1 - line));
+              const vivid = gray + (original[index + channel] - gray) * 1.1;
+              const contrasted = (vivid - 128) * 1.04 + 128 + paperTint[channel];
+              const toned = clamp(contrasted, 0, 255);
+              const posterized = Math.round(toned / colorStep) * colorStep;
+              const softlyPainted = toned * 0.68 + posterized * 0.32;
+              const inked = softlyPainted * (1 - ink) + inkColor[channel] * ink;
+              pixels[index + channel] = Math.round(inked * (1 - hatch) + inkColor[channel] * hatch);
             }
           }
+          if (y > 0 && y % 48 === 0) {
+            onProgress(y / height);
+            await nextFrame();
+          }
         }
+        onProgress(1);
         return imageData;
       }
 
-      async function createComicBlob(file) {
-        const bitmap = await createImageBitmap(file);
+      async function decodeImage(file) {
+        if (typeof createImageBitmap === "function") {
+          try {
+            return await createImageBitmap(file);
+          } catch {
+            // Fall back to the image element decoder used by older WebViews.
+          }
+        }
+
+        const objectUrl = URL.createObjectURL(file);
+        try {
+          const image = new Image();
+          await new Promise((resolve, reject) => {
+            image.onload = resolve;
+            image.onerror = () => reject(new Error("이미지 파일을 읽을 수 없습니다."));
+            image.src = objectUrl;
+          });
+          return {
+            width: image.naturalWidth,
+            height: image.naturalHeight,
+            drawSource: image,
+            close: () => URL.revokeObjectURL(objectUrl)
+          };
+        } catch (error) {
+          URL.revokeObjectURL(objectUrl);
+          throw error;
+        }
+      }
+
+      async function createComicBlob(file, onProgress) {
+        const bitmap = await decodeImage(file);
         try {
           const scale = Math.min(
             1,
@@ -893,9 +965,9 @@
 
           context.fillStyle = "#fff";
           context.fillRect(0, 0, width, height);
-          context.drawImage(bitmap, 0, 0, width, height);
+          context.drawImage(bitmap.drawSource ?? bitmap, 0, 0, width, height);
           const imageData = context.getImageData(0, 0, width, height);
-          context.putImageData(applyComicEffect(imageData, width, height), 0, 0);
+          context.putImageData(await applyComicEffect(imageData, width, height, onProgress), 0, 0);
 
           const blob = await new Promise((resolve, reject) => {
             canvas.toBlob((result) => {
@@ -939,11 +1011,14 @@
         clearError();
         releaseResult();
         setProcessing(true);
-        statusMessage.textContent = "사진을 만화풍으로 바꾸고 있어요. 잠시만 기다려주세요.";
-        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        statusMessage.textContent = "섬세한 펜 선과 따뜻한 색감을 입히고 있어요. 잠시만 기다려주세요.";
+        await nextFrame();
 
         try {
-          const { blob, width, height } = await createComicBlob(sourceFile);
+          const { blob, width, height } = await createComicBlob(sourceFile, (progress) => {
+            const percent = Math.round(progress * 100);
+            statusMessage.textContent = `일러스트 만화풍으로 바꾸고 있어요 · ${percent}%`;
+          });
           releaseResult();
           resultUrl = URL.createObjectURL(blob);
           resultPreview.src = resultUrl;
@@ -952,7 +1027,7 @@
           downloadButton.href = resultUrl;
           downloadButton.download = `${sourceFile.name.replace(/\.[^.]+$/, "")}-comic.png`;
           downloadButton.classList.add("is-visible");
-          statusMessage.textContent = `변환 완료! ${width.toLocaleString()} × ${height.toLocaleString()}px PNG로 저장할 수 있어요.`;
+          statusMessage.textContent = `일러스트 만화풍 완성! ${width.toLocaleString()} × ${height.toLocaleString()}px PNG로 저장할 수 있어요.`;
         } catch (error) {
           console.error("이미지 변환에 실패했습니다.", error);
           showError(error instanceof Error
